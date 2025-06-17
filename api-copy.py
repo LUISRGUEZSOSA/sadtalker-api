@@ -121,80 +121,140 @@ class Item(BaseModel):
 @app.post("/generate/")
 async def sadtalker_create(item: Item):
     try:
-        # 1) Crea carpeta de resultados
+        # PIC_PATH = "/mnt/work/Code/SadTalker/examples/source_image/art_0.png"
         RESULT_DIR = "./results"
         save_dir   = os.path.join(RESULT_DIR, strftime("%Y_%m_%d_%H.%M.%S"))
         os.makedirs(save_dir, exist_ok=True)
 
-        # 2) Descarga la imagen
+        # 2) Descargar imagen
         download_file(item.image_link, save_dir)
         PIC_PATH = os.path.join(save_dir, os.path.basename(item.image_link))
 
-        # 3) Genera o descarga el audio
+        # 3) **Generar o descargar el audio**  
         if item.audio_link.endswith("silence.wav"):
+            # Generamos silencio localmente
             AUDIO_PATH = make_silence(
                 os.path.join(save_dir, "silence.wav"),
                 duration_s=2.0,
                 sr=16000
             )
         else:
+            # Descargamos el audio remoto
             download_file(item.audio_link, save_dir)
             AUDIO_PATH = os.path.join(save_dir, os.path.basename(item.audio_link))
 
-        # 4) Inicializa tu pipeline SadTalker
-        DEVICE        = "cuda" if torch.cuda.is_available() else "cpu"
-        POSE_STYLE    = 0
-        BATCH_SIZE    = 2
-        INPUT_YAW_LIST   = None
+        # 4) Resto de tu pipeline...
+        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+        POSE_STYLE      = 0
+        BATCH_SIZE = 2
+        INPUT_YAW_LIST = None
         INPUT_PITCH_LIST = None
-        INPUT_ROLL_LIST  = None
-        REF_EYEBLINK     = None
-        REF_POSE         = None
-        PREPROCESS        = "full"
-        SIZE              = 256
-        ENHANCER          = None
+        INPUT_ROLL_LIST = None
+        REF_EYEBLINK = None
+        REF_POSE = None
+        CHECKPOINT_DIR = "./checkpoints"
+        OLD_VERSION = False
+        PREPROCESS = "full"
+        EXPRESSION_SCALE = 1.0
+        STILL = True
+        SIZE = 256
         BACKGROUND_ENHANCER = None
-        FACE3DVIS         = False
-        VERBOSE           = False
+        ENHANCER = None
+        FACE3DVIS = False
+        VERBOSE = False
 
-        # Inicializar modelos
-        sadtalker_paths    = init_path("./checkpoints", "./src/config", SIZE, False, PREPROCESS)
-        preprocess_model   = CropAndExtract(sadtalker_paths, DEVICE)
-        audio_to_coeff     = Audio2Coeff(sadtalker_paths, DEVICE)
+        current_root_path = './' #os.path.split(sys.argv[0])[0]
+        sadtalker_paths = init_path(CHECKPOINT_DIR, os.path.join(current_root_path, 'src/config'), 256, OLD_VERSION, PREPROCESS)
+        
+            #init model
+        preprocess_model = CropAndExtract(sadtalker_paths, DEVICE)
+
+        audio_to_coeff = Audio2Coeff(sadtalker_paths,  DEVICE)
+        
         animate_from_coeff = AnimateFromCoeff(sadtalker_paths, DEVICE)
 
-        # 5) Extracción de coeficientes 3DMM
-        first_frame_dir = os.path.join(save_dir, "first_frame_dir")
+        first_frame_dir = os.path.join(save_dir, 'first_frame_dir')
         os.makedirs(first_frame_dir, exist_ok=True)
-        first_coeff_path, crop_pic_path, crop_info = preprocess_model.generate(
-            PIC_PATH, first_frame_dir, PREPROCESS, source_image_flag=True, pic_size=SIZE
-        )
+        print('3DMM Extraction for source image')
+        first_coeff_path, crop_pic_path, crop_info =  preprocess_model.generate(PIC_PATH, first_frame_dir, PREPROCESS,\
+                                                                                source_image_flag=True, pic_size=SIZE)
         if first_coeff_path is None:
-            raise RuntimeError("No se obtuvieron coeficientes del input")
+            print("Can't get the coeffs of the input")
+            return
 
-        # 6) Audio2Coeff + FaceRenderer
-        batch      = get_data(first_coeff_path, AUDIO_PATH, DEVICE, REF_EYEBLINK, still=True)
-        coeff_path = audio_to_coeff.generate(batch, save_dir, POSE_STYLE, REF_POSE)
-        data       = get_facerender_data(
-            coeff_path, crop_pic_path, first_coeff_path, AUDIO_PATH,
-            BATCH_SIZE, INPUT_YAW_LIST, INPUT_PITCH_LIST, INPUT_ROLL_LIST,
-            expression_scale=1.0, still_mode=True, preprocess=PREPROCESS, size=SIZE
-        )
-        result = animate_from_coeff.generate(
-            data, save_dir, PIC_PATH, crop_info,
-            enhancer=ENHANCER, background_enhancer=BACKGROUND_ENHANCER, img_size=SIZE
-        )
+        if REF_EYEBLINK is not None:
+            ref_eyeblink_videoname = os.path.splitext(os.path.split(REF_EYEBLINK)[-1])[0]
+            ref_eyeblink_frame_dir = os.path.join(save_dir, ref_eyeblink_videoname)
+            os.makedirs(ref_eyeblink_frame_dir, exist_ok=True)
+            print('3DMM Extraction for the reference video providing eye blinking')
+            ref_eyeblink_coeff_path, _, _ =  preprocess_model.generate(REF_EYEBLINK, ref_eyeblink_frame_dir, PREPROCESS, source_image_flag=False)
+        else:
+            ref_eyeblink_coeff_path=None
 
-        # 7) Mueve el vídeo final
-        out_file = save_dir + ".mp4"
-        shutil.move(result, out_file)
+        if REF_POSE is not None:
+            if REF_POSE == REF_EYEBLINK: 
+                ref_pose_coeff_path = ref_eyeblink_coeff_path
+            else:
+                ref_pose_videoname = os.path.splitext(os.path.split(REF_POSE)[-1])[0]
+                ref_pose_frame_dir = os.path.join(save_dir, ref_pose_videoname)
+                os.makedirs(ref_pose_frame_dir, exist_ok=True)
+                print('3DMM Extraction for the reference video providing pose')
+                ref_pose_coeff_path, _, _ =  preprocess_model.generate(REF_POSE, ref_pose_frame_dir, PREPROCESS, source_image_flag=False)
+        else:
+            ref_pose_coeff_path=None
+        
+        #audio2ceoff
+        batch = get_data(first_coeff_path, AUDIO_PATH, DEVICE, ref_eyeblink_coeff_path, still=STILL)
+        coeff_path = audio_to_coeff.generate(batch, save_dir, POSE_STYLE, ref_pose_coeff_path)
+        
+        opt = {
+            "net_recon": 'resnet50',
+            "init_path": None,
+            "use_last_fc": False,
+            "bfm_folder": "./checkpoints/BFM_Fitting/",
+            "bfm_model": "BFM_model_front.mat",
+            "focal": 1015.0,
+            "center": 112.0,
+            "camera_d": 10.0,
+            "z_near": 5.0,
+            "z_far": 15.0,
+        }
 
-        # 8) Devuelve la URL local
-        video_url = f"http://localhost:8000/results/{os.path.basename(out_file)}"
-        return JSONResponse({"video_url": video_url})
+        # 3dface render
+        if FACE3DVIS:
+            from src.face3d.visualize import gen_composed_video
+            gen_composed_video(opt, DEVICE, first_coeff_path, coeff_path, AUDIO_PATH, os.path.join(save_dir, '3dface.mp4'))
 
+
+        #coeff2video
+        data = get_facerender_data(coeff_path, crop_pic_path, first_coeff_path, AUDIO_PATH, 
+                                    BATCH_SIZE, INPUT_YAW_LIST, INPUT_PITCH_LIST, INPUT_ROLL_LIST,
+                                    expression_scale=EXPRESSION_SCALE, still_mode=STILL, preprocess=PREPROCESS, size=SIZE)
+        
+        result = animate_from_coeff.generate(data, save_dir, PIC_PATH, crop_info, \
+                                    enhancer=ENHANCER, background_enhancer=BACKGROUND_ENHANCER, preprocess=PREPROCESS, img_size=SIZE)
+        shutil.move(result, save_dir+'.mp4')
+        print('The generated video is named:', save_dir+'.mp4')
+
+        if not VERBOSE:
+            shutil.rmtree(save_dir)
+
+        file_path = save_dir + '.mp4'
+        print(file_path)
+        print(os.path.exists(file_path))
+        if item.s3_object_path[-1] != '/':
+            item.s3_object_path += '/'
+        object_name = item.s3_object_path + os.path.basename(file_path)
+        upload_file_aws(file_path, object_name)
+        s3_url = f'https://{AWS_S3_BUCKET_NAME}.s3.{AWS_S3_REGION}.amazonaws.com/{object_name}'
+        os.remove(file_path)
+        s3_url = f"https://{AWS_S3_BUCKET_NAME}.s3.{AWS_S3_REGION}.amazonaws.com/{object_name}"
+        return JSONResponse({"video_url": s3_url})
+    
     except Exception as e:
+        # Traza para depurar
         import traceback; traceback.print_exc()
+        # Siempre devolver JSON con CORS
         return JSONResponse(
             {"error": "Internal processing error", "detail": str(e)},
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
